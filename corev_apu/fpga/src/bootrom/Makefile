@@ -42,8 +42,14 @@ LDFLAGS = -nostdlib -nodefaultlibs -nostartfiles
 
 INCLUDES = -I./ -I./src
 
-SRCS_C = src/main.c src/uart.c src/spi.c src/sd.c src/gpt.c src/dw_mmc.c src/bouncebuf.c
+# Define the source files by hardware platform
+SRCS_C = src/main.c src/uart.c src/spi.c src/sd.c src/gpt.c
+ifeq ($(PLATFORM), PLAT_AGILEX)
+SRCS_C += src/dw_mmc.c src/bouncebuf.c
+endif
+
 SRCS_ASM = startup.S
+
 OBJS_C = $(SRCS_C:.c=.o)
 OBJS_S = $(SRCS_ASM:.S=.o)
 
