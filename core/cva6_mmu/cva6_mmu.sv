@@ -18,7 +18,7 @@
 // Description: Memory Management Unit for CVA6, contains TLB and
 //              address translation unit. SV32 SV39 and SV39x4 as defined in RISC-V
 //              privilege specification 1.11-WIP.
-//              This module is an merge of the MMU Sv39 developed
+//              This module is a merge of the MMU Sv39 developed
 //              by Florian Zaruba, the MMU Sv32 developed by Sebastien Jacq and the MMU Sv39x4 developed by Bruno Sá.
 
 
@@ -72,6 +72,7 @@ module cva6_mmu
     input logic vs_sum_i,
     input logic mxr_i,
     input logic vmxr_i,
+    input logic mbe_i,
     input logic hlvx_inst_i,
     input logic hs_ld_st_inst_i,
     // input logic flag_mprv_i,
@@ -344,7 +345,7 @@ module cva6_mmu
       .hgatp_ppn_i,
       .mxr_i,
       .vmxr_i,
-
+      .mbe_i(mbe_i),
       // Performance counters
       .shared_tlb_miss_o(shared_tlb_miss),  //open for now
 
@@ -364,7 +365,7 @@ module cva6_mmu
   always_comb begin : instr_interface
     // MMU disabled: just pass through
     icache_areq_o.fetch_valid = icache_areq_i.fetch_req;
-    icache_areq_o.fetch_paddr  = CVA6Cfg.PLEN'(icache_areq_i.fetch_vaddr[((CVA6Cfg.PLEN > CVA6Cfg.VLEN) ? CVA6Cfg.VLEN -1: CVA6Cfg.PLEN -1 ):0]);
+    icache_areq_o.fetch_paddr = CVA6Cfg.PLEN'(icache_areq_i.fetch_vaddr[((CVA6Cfg.PLEN > CVA6Cfg.VLEN) ? CVA6Cfg.VLEN -1: CVA6Cfg.PLEN -1 ):0]);
     // two potential exception sources:
     // 1. HPTW threw an exception -> signal with a page fault exception
     // 2. We got an access error because of insufficient permissions -> throw an access exception
@@ -381,9 +382,12 @@ module cva6_mmu
     // AXI decode error), or when PTW performs walk due to ITLB miss and raises
     // an error.
     if ((enable_translation_i || enable_g_translation_i)) begin
-      // we work with SV39 or SV32, so if VM is enabled, check that all bits [CVA6Cfg.VLEN-1:CVA6Cfg.SV-1] are equal
-      if (icache_areq_i.fetch_req && !((&icache_areq_i.fetch_vaddr[CVA6Cfg.VLEN-1:CVA6Cfg.SV-1]) == 1'b1 || (|icache_areq_i.fetch_vaddr[CVA6Cfg.VLEN-1:CVA6Cfg.SV-1]) == 1'b0)) begin
-
+      // If second-level address translation is enabled:
+      // - in VS stage, check that all bits [CVA6Cfg.VLEN-1:CVA6Cfg.SV-1] are equal
+      // - in pure G stage (SV39x4 mode), [CVA6Cfg.VLEN-1:CVA6Cfg.GPLEN] must be zero.
+      // - in pure G stage (SV32x4 mode), no check is needed.
+      if ((enable_translation_i && (icache_areq_i.fetch_req && !((&icache_areq_i.fetch_vaddr[CVA6Cfg.VLEN-1:CVA6Cfg.SV-1]) == 1'b1 || (|icache_areq_i.fetch_vaddr[CVA6Cfg.VLEN-1:CVA6Cfg.SV-1]) == 1'b0)))
+          || (enable_g_translation_i && !enable_translation_i && CVA6Cfg.IS_XLEN64 && (|icache_areq_i.fetch_vaddr[CVA6Cfg.VLEN-1:CVA6Cfg.GPLEN] != 1'b0))) begin
         icache_areq_o.fetch_exception.cause = riscv::INSTR_PAGE_FAULT;
         icache_areq_o.fetch_exception.valid = 1'b1;
         if (CVA6Cfg.TvalEn)
@@ -472,7 +476,7 @@ module cva6_mmu
         end else begin
           icache_areq_o.fetch_exception.cause = riscv::INSTR_ACCESS_FAULT;
           icache_areq_o.fetch_exception.valid = 1'b1;
-          if (CVA6Cfg.TvalEn)  //To confirm this is the right TVAL
+          if (CVA6Cfg.TvalEn)  // To confirm this is the right TVAL
             icache_areq_o.fetch_exception.tval = CVA6Cfg.XLEN'(update_vaddr);
           if (CVA6Cfg.RVH) begin
             icache_areq_o.fetch_exception.tval2 = '0;
@@ -534,7 +538,7 @@ module cva6_mmu
     if (CVA6Cfg.RVH) begin
       lsu_tinst_n = lsu_tinst_i;
       hs_ld_st_inst_n = hs_ld_st_inst_i;
-      lsu_gpaddr_n[(CVA6Cfg.XLEN == 32 ? CVA6Cfg.VLEN: CVA6Cfg.GPLEN)-1:0] = dtlb_gpaddr[(CVA6Cfg.XLEN == 32 ? CVA6Cfg.VLEN: CVA6Cfg.GPLEN)-1:0];
+      lsu_gpaddr_n[(CVA6Cfg.IS_XLEN32 ? CVA6Cfg.VLEN: CVA6Cfg.GPLEN)-1:0] = dtlb_gpaddr[(CVA6Cfg.IS_XLEN32 ? CVA6Cfg.VLEN: CVA6Cfg.GPLEN)-1:0];
       csr_hs_ld_st_inst_o = hs_ld_st_inst_i || hs_ld_st_inst_q;
       d_g_st_access_err = en_ld_st_g_translation_i && !dtlb_gpte_q.u;
       dtlb_gpte_n = dtlb_g_content;
@@ -589,7 +593,7 @@ module cva6_mmu
                 {CVA6Cfg.XLEN - CVA6Cfg.VLEN{lsu_vaddr_q[CVA6Cfg.VLEN-1]}}, lsu_vaddr_q
               };
             if (CVA6Cfg.RVH) begin
-              lsu_exception_o.tval2 = CVA6Cfg.GPLEN'(lsu_gpaddr_q[(CVA6Cfg.XLEN==32 ? CVA6Cfg.VLEN : CVA6Cfg.GPLEN)-1:0]);
+              lsu_exception_o.tval2 = CVA6Cfg.GPLEN'(lsu_gpaddr_q[(CVA6Cfg.IS_XLEN32 ? CVA6Cfg.VLEN : CVA6Cfg.GPLEN)-1:0]);
               lsu_exception_o.tinst = '0;
               lsu_exception_o.gva = ld_st_v_i;
             end
@@ -616,7 +620,7 @@ module cva6_mmu
                 {CVA6Cfg.XLEN - CVA6Cfg.VLEN{lsu_vaddr_q[CVA6Cfg.VLEN-1]}}, lsu_vaddr_q
               };
             if (CVA6Cfg.RVH) begin
-              lsu_exception_o.tval2 = CVA6Cfg.GPLEN'(lsu_gpaddr_q[(CVA6Cfg.XLEN==32 ? CVA6Cfg.VLEN : CVA6Cfg.GPLEN)-1:0]);
+              lsu_exception_o.tval2 = CVA6Cfg.GPLEN'(lsu_gpaddr_q[(CVA6Cfg.IS_XLEN32 ? CVA6Cfg.VLEN : CVA6Cfg.GPLEN)-1:0]);
               lsu_exception_o.tinst = '0;
               lsu_exception_o.gva = ld_st_v_i;
             end

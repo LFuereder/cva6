@@ -164,6 +164,8 @@ module cva6
       fu_t                              fu;
       fu_op                             operation;
       logic [CVA6Cfg.TRANS_ID_BITS-1:0] trans_id;
+      logic                             is_speculative_load;
+      logic                             is_speculative_load_miss;
     },
 
 
@@ -372,14 +374,15 @@ module cva6
   // Global Signals
   // Signals connecting more than one module
   // ------------------------------------------
-  riscv::priv_lvl_t                             priv_lvl;
-  logic                                         v;
-  exception_t                                   ex_commit;  // exception from commit stage
-  bp_resolve_t                                  resolved_branch;
-  logic             [         CVA6Cfg.VLEN-1:0] pc_commit;
-  logic                                         eret;
-  logic             [CVA6Cfg.NrCommitPorts-1:0] commit_ack;
-  logic             [CVA6Cfg.NrCommitPorts-1:0] commit_macro_ack;
+  riscv::priv_lvl_t priv_lvl;
+  logic v;
+  exception_t ex_commit;  // exception from commit stage
+  bp_resolve_t resolved_branch;
+  logic [CVA6Cfg.VLEN-1:0] pc_commit;
+  logic eret;
+  logic [CVA6Cfg.NrCommitPorts-1:0] commit_ack;
+  logic [CVA6Cfg.NrCommitPorts-1:0] commit_macro_ack;
+  logic mbe;  // determines the data endian-ness of the processor
 
   localparam NumPorts = 4;
 
@@ -686,8 +689,9 @@ module cva6
       .clk_i,
       .rst_ni,
       .boot_addr_i        (boot_addr_i[CVA6Cfg.VLEN-1:0]),
-      .flush_bp_i         (1'b0),
-      .flush_i            (flush_ctrl_if),                  // not entirely correct
+      .flush_bp_i         ((CVA6Cfg.RVU || CVA6Cfg.RVS) ? flush_ctrl_bp : 1'b0),
+      // below line is not entirely correct
+      .flush_i            (flush_ctrl_if),
       .halt_i             (halt_ctrl),
       .halt_frontend_i    (halt_frontend),
       .set_pc_commit_i    (set_pc_ctrl_pcgen),
@@ -1074,6 +1078,7 @@ module cva6
       .flush_tlb_vvma_i        (flush_tlb_vvma_ctrl_ex),
       .flush_tlb_gvma_i        (flush_tlb_gvma_ctrl_ex),
       .priv_lvl_i              (priv_lvl),                       // from CSR
+      .mbe_i                   (mbe),                            // from CSR
       .v_i                     (v),                              // from CSR
       .ld_st_priv_lvl_i        (ld_st_priv_lvl_csr_ex),          // from CSR
       .ld_st_v_i               (ld_st_v_csr_ex),                 // from CSR
@@ -1189,6 +1194,7 @@ module cva6
       .eret_o                  (eret),
       .trap_vector_base_o      (trap_vector_base_commit_pcgen),
       .priv_lvl_o              (priv_lvl),
+      .mbe_o                   (mbe),
       .v_o                     (v),
       .acc_fflags_ex_i         (acc_resp_fflags),
       .acc_fflags_ex_valid_i   (acc_resp_fflags_valid),
@@ -1422,6 +1428,7 @@ module cva6
         // to commit stage
         .dcache_amo_req_i  (amo_req),
         .dcache_amo_resp_o (amo_resp),
+        .mbe_i             (mbe),
         // from PTW, Load Unit  and Store Unit
         .dcache_miss_o     (dcache_miss_cache_perf),
         .miss_vld_bits_o   (miss_vld_bits),
@@ -1460,9 +1467,7 @@ module cva6
         .axi_b_chan_t (b_chan_t),
         .axi_r_chan_t (r_chan_t),
         .noc_req_t (noc_req_t),
-        .noc_resp_t(noc_resp_t),
-        .cmo_req_t (logic  /*FIXME*/),
-        .cmo_rsp_t (logic  /*FIXME*/)
+        .noc_resp_t(noc_resp_t)
     ) i_cache_subsystem (
         .clk_i (clk_i),
         .rst_ni(rst_ni),
@@ -1482,9 +1487,6 @@ module cva6
 
         .dcache_amo_req_i (amo_req),
         .dcache_amo_resp_o(amo_resp),
-
-        .dcache_cmo_req_i ('0  /*FIXME*/),
-        .dcache_cmo_resp_o(  /*FIXME*/),
 
         .dcache_req_ports_i(dcache_req_to_cache),
         .dcache_req_ports_o(dcache_req_from_cache),
@@ -1678,7 +1680,7 @@ module cva6
   logic [CVA6Cfg.NrCommitPorts-1:0] pc_pop, pc_empty;
 
   for (genvar i = 0; i < CVA6Cfg.NrCommitPorts; i++) begin : gen_pc_fifo
-    fifo_v3 #(
+    cva6_fifo_v3 #(
         .DATA_WIDTH(64),
         .DEPTH(PC_QUEUE_DEPTH),
         .FPGA_EN(CVA6Cfg.FpgaEn)
